@@ -1,365 +1,427 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Gonnie Fleet — Trip Capture</title>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<style>
-  :root {
-    --bg: #0f172a; --card: #1e293b; --accent: #f59e0b; --accent2: #2563eb;
-    --text: #f1f5f9; --muted: #94a3b8; --ok: #22c55e; --err: #ef4444;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; font-family: -apple-system, Segoe UI, Roboto, sans-serif;
-    background: var(--bg); color: var(--text); padding: 16px;
-  }
-  h1 { font-size: 1.25rem; margin: 0 0 4px; }
-  .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 16px; }
-  .card {
-    background: var(--card); border-radius: 12px; padding: 16px; margin-bottom: 14px;
-  }
-  .toggle {
-    display: flex; background: #0b1220; border-radius: 10px; padding: 4px; margin-bottom: 16px;
-  }
-  .toggle button {
-    flex: 1; padding: 10px; border: none; border-radius: 8px; background: transparent;
-    color: var(--muted); font-weight: 600; font-size: 0.95rem; cursor: pointer;
-  }
-  .toggle button.active { background: var(--accent); color: #1a1a1a; }
-  label { display: block; font-size: 0.8rem; color: var(--muted); margin: 10px 0 4px; }
-  input, select, textarea {
-    width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #334155;
-    background: #0b1220; color: var(--text); font-size: 0.95rem;
-  }
-  textarea { resize: vertical; min-height: 50px; }
-  .row { display: flex; gap: 10px; }
-  .row > div { flex: 1; }
-  .hint { font-size: 0.78rem; color: var(--accent); margin-top: 4px; min-height: 1em; }
-  .photo-btn {
-    display: block; width: 100%; padding: 14px; margin-top: 8px; border-radius: 8px;
-    border: 2px dashed #475569; background: #0b1220; color: var(--muted);
-    text-align: center; cursor: pointer; font-size: 0.9rem;
-  }
-  .photo-btn.has-photo { border-color: var(--ok); color: var(--ok); }
-  .preview { max-width: 100%; border-radius: 8px; margin-top: 8px; display: none; }
-  .ocr-status { font-size: 0.8rem; color: var(--accent2); margin-top: 6px; }
-  .section-title {
-    font-weight: 700; margin: 0 0 8px; font-size: 0.95rem; color: var(--accent);
-  }
-  .submit-btn {
-    width: 100%; padding: 14px; margin-top: 6px; border: none; border-radius: 10px;
-    background: var(--ok); color: #06240f; font-weight: 700; font-size: 1rem; cursor: pointer;
-  }
-  .submit-btn:disabled { opacity: 0.5; }
-  #result { margin-top: 12px; padding: 12px; border-radius: 8px; display: none; font-size: 0.9rem; }
-  #result.ok { background: #052e16; color: var(--ok); display: block; }
-  #result.err { background: #2b0a0a; color: var(--err); display: block; }
-  .config-warning {
-    background: #3b0d0d; color: #fca5a5; padding: 10px; border-radius: 8px;
-    font-size: 0.82rem; margin-bottom: 14px; display: none;
-  }
-</style>
-</head>
-<body>
+/**
+ * GONNIE FLEET — ONE SCRIPT FOR THIS WORKBOOK
+ * 1. GPS distance ....... googlemaps_distance(from, to) -> km (Trip Log column AF)
+ * 2. Capture web app .... doPost / doGet -> writes ONE new trip into 'Trip Log' (inputs only)
+ * 3. Investigation ...... runInvestigation() -> Alerts, Cases and Fleet Investigation Centre
+ * First-time setup: run setupTriggers() once and accept the permissions.
+ */
 
-<h1>🚚 Gonnie Fleet — Trip Capture</h1>
-<div class="sub">Zach's Group Logistics</div>
+var TRIP_SHEET   = 'Trip Log';
+var ALERT_SHEET  = 'Investigation Alerts';
+var CASE_SHEET   = 'Investigation Cases';
+var CENTRE_SHEET = 'Fleet Investigation Centre';
+var FIRST_ROW    = 3;
+var PHOTO_FOLDER = 'Gonnie Fleet Photos';
+var DEFAULT_MANAGER = 'WAYNAND';
+var DEFAULT_MANAGER_PHONE = 27836445128;
 
-<div id="configWarning" class="config-warning">
-  ⚠️ Set <code>API_URL</code> at the top of this file's &lt;script&gt; section to your
-  Apps Script <code>/exec</code> URL before this will work.
-</div>
+/* ---------- 0. MENU + TRIGGERS ---------- */
 
-<div class="toggle">
-  <button id="btnScan" class="active" onclick="setMode('scan')">📷 Scan</button>
-  <button id="btnManual" onclick="setMode('manual')">⌨️ Manual</button>
-</div>
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('🚚 Gonnie Fleet')
+    .addItem('Run investigation now', 'runInvestigation')
+    .addItem('Set up automatic updates', 'setupTriggers')
+    .addToUi();
+}
 
-<form id="tripForm">
+function setupTriggers() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'runInvestigation') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('runInvestigation').timeBased().everyHours(1).create();
+  SpreadsheetApp.getActive().toast('Investigation will now refresh every hour.');
+}
 
-  <div class="card">
-    <div class="section-title">Vehicle & Driver</div>
-    <label>Registration</label>
-    <select id="registration" required>
-      <option value="">Loading vehicles…</option>
-    </select>
-    <div class="hint" id="vehicleHint"></div>
+/* ---------- 1. GPS / ROAD DISTANCE ---------- */
 
-    <label>Driver</label>
-    <select id="driver_name" required>
-      <option value="">Loading drivers…</option>
-    </select>
+/**
+ * Driving distance in km between two addresses.
+ * @customfunction
+ */
+function googlemaps_distance(origin, destination) {
+  origin = String(origin || '').trim();
+  destination = String(destination || '').trim();
+  if (!origin || !destination) return '';
+  if (origin.toUpperCase() === destination.toUpperCase()) return 0;
 
-    <div class="row">
-      <div>
-        <label>Driver Phone</label>
-        <input type="tel" id="driver_phone" placeholder="0836445128">
-      </div>
-      <div>
-        <label>Date</label>
-        <input type="date" id="date" required>
-      </div>
-    </div>
-  </div>
+  var raw = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, origin.toUpperCase() + '|' + destination.toUpperCase());
+  var key = 'gmd_' + Utilities.base64EncodeWebSafe(raw);
+  var cache = CacheService.getScriptCache();
+  var hit = cache.get(key);
+  if (hit !== null) return Number(hit);
 
-  <!-- SCAN MODE: photo capture + OCR -->
-  <div class="card" id="scanCard">
-    <div class="section-title">Odometer — Photo</div>
-    <label class="photo-btn" id="odoPhotoBtn" for="odoPhotoInput">Tap to take a photo of the odometer</label>
-    <input type="file" id="odoPhotoInput" accept="image/*" capture="environment" style="display:none">
-    <img id="odoPreview" class="preview">
-    <div class="ocr-status" id="odoOcrStatus"></div>
+  var res = Maps.newDirectionFinder()
+    .setOrigin(origin)
+    .setDestination(destination)
+    .setMode(Maps.DirectionFinder.Mode.DRIVING)
+    .getDirections();
+  if (!res || res.status !== 'OK' || !res.routes || !res.routes.length) return '';
 
-    <div class="section-title" style="margin-top:16px">Fuel Receipt / Pump — Photo</div>
-    <label class="photo-btn" id="fuelPhotoBtn" for="fuelPhotoInput">Tap to take a photo of the fuel receipt</label>
-    <input type="file" id="fuelPhotoInput" accept="image/*" capture="environment" style="display:none">
-    <img id="fuelPreview" class="preview">
-    <div class="ocr-status" id="fuelOcrStatus"></div>
-  </div>
+  var meters = 0;
+  res.routes[0].legs.forEach(function (leg) { meters += leg.distance.value; });
+  var km = Math.round(meters / 100) / 10;
+  cache.put(key, String(km), 21600);
+  return km;
+}
 
-  <div class="card">
-    <div class="section-title">Odometer & Fuel</div>
-    <div class="row">
-      <div>
-        <label>Odo Start (km)</label>
-        <input type="number" step="any" id="odo_start" required>
-      </div>
-      <div>
-        <label>Odo End (km)</label>
-        <input type="number" step="any" id="odo_end">
-      </div>
-    </div>
-    <div class="row">
-      <div>
-        <label>Fuel Used (L)</label>
-        <input type="number" step="any" id="fuel_used_l" required>
-      </div>
-      <div>
-        <label>Cost/Liter (R)</label>
-        <input type="number" step="any" id="cost_per_liter" required>
-      </div>
-    </div>
-    <div class="row">
-      <div>
-        <label>Fill Type</label>
-        <select id="fill_type">
-          <option value="Metered">Metered</option>
-          <option value="Full-to-Full">Full-to-Full</option>
-          <option value="Manual">Manual Entry</option>
-        </select>
-      </div>
-      <div>
-        <label>Fuel Filled on Return (L)</label>
-        <input type="number" step="any" id="fuel_filled_return_l">
-      </div>
-    </div>
-  </div>
+/* ---------- 2. CAPTURE WEB APP ---------- */
+/*
+ * Deploy: Deploy > New deployment > Web app > Execute as: Me > Access: Anyone.
+ * JSON fields (all optional except registration): date, registration, driver_name,
+ * driver_phone, odo_start, odo_end, fuel_used_l, cost_per_liter, no_trips,
+ * start_destination (or route), revenue, cargo_type, load_kg, fuel_station, customer,
+ * notes, manager, manager_phone, fuel_return_l, fill_type, paid_status,
+ * photo (base64 / data URL), photo_type
+ */
 
-  <div class="card">
-    <div class="section-title">Route & Cargo</div>
-    <label>Start Destination</label>
-    <input type="text" id="start_destination" placeholder="151 South Coast Road, Durban" required>
-    <label>End Destination <span style="color:var(--muted)">(leave blank to use route lookup)</span></label>
-    <input type="text" id="end_destination" placeholder="Optional">
-    <div class="row">
-      <div>
-        <label>Cargo Type</label>
-        <input type="text" id="cargo_type" placeholder="Break Bulk">
-      </div>
-      <div>
-        <label>Load (kg)</label>
-        <input type="number" step="any" id="load_kg">
-      </div>
-    </div>
-    <label>Fuel Station</label>
-    <input type="text" id="fuel_station" placeholder="Shiptech:Catoridge">
-  </div>
+function doPost(e) {
+  var lock = LockService.getScriptLock();
+  var out;
+  try {
+    lock.waitLock(30000);
+    var data = JSON.parse(e.postData.contents);
+    var sh = SpreadsheetApp.getActive().getSheetByName(TRIP_SHEET);
+    if (!sh) throw new Error("Tab '" + TRIP_SHEET + "' not found");
 
-  <div class="card">
-    <div class="section-title">Commercial</div>
-    <div class="row">
-      <div>
-        <label>Revenue (R)</label>
-        <input type="number" step="any" id="revenue" required>
-      </div>
-      <div>
-        <label>Customer</label>
-        <input type="text" id="customer">
-      </div>
-    </div>
-    <label>Manager</label>
-    <input type="text" id="manager">
-    <label>Notes</label>
-    <textarea id="notes" placeholder="Anything worth flagging about this trip"></textarea>
-  </div>
+    var reg = String(data.registration || '').trim().toUpperCase();
+    if (!reg) throw new Error('registration is required');
 
-  <button type="submit" class="submit-btn" id="submitBtn">Log Trip</button>
-  <div id="result"></div>
-</form>
+    var oS = num_(data.odo_start), oE = num_(data.odo_end);
+    if (oS !== '' && oE !== '' && oE < oS) {
+      throw new Error('Odometer end (' + oE + ') is lower than odometer start (' + oS + '). Please check.');
+    }
 
-<script>
-  // ── CONFIG ──────────────────────────────────────────────────────────
-  const API_URL = "https://script.google.com/macros/s/AKfycby3oRIh2tF9M_RzGctvxNQsmdRvgwLjz8DPftcDSTfbkuu21AQYFNlapjMT5ORrb159/exec";
-  // ────────────────────────────────────────────────────────────────────
+    var dates = sh.getRange(FIRST_ROW, 2, sh.getMaxRows() - FIRST_ROW + 1, 1).getValues();
+    var lastIdx = -1;
+    for (var i = 0; i < dates.length; i++) if (dates[i][0] !== '' && dates[i][0] !== null) lastIdx = i;
+    var row = FIRST_ROW + lastIdx + 1;
+    if (row > sh.getMaxRows()) throw new Error('No free rows left in Trip Log');
 
-  if (!API_URL || API_URL.indexOf("PASTE_YOUR") === 0) {
-    document.getElementById('configWarning').style.display = 'block';
+    var prevMgr = lastIdx >= 0 ? sh.getRange(row - 1, 19, 1, 2).getValues()[0] : [DEFAULT_MANAGER, DEFAULT_MANAGER_PHONE];
+
+    var when = data.date ? new Date(data.date) : new Date();
+    if (isNaN(when.getTime())) when = new Date();
+
+    var customer = String(data.customer || '').trim();
+    var notes = String(data.notes || '').trim();
+
+    put_(sh, row, 'B',  when);
+    put_(sh, row, 'D',  reg);
+    put_(sh, row, 'E',  String(data.driver_name || '').trim().toUpperCase());
+    put_(sh, row, 'F',  data.driver_phone || '');
+    put_(sh, row, 'G',  oS);
+    put_(sh, row, 'H',  oE);
+    put_(sh, row, 'I',  num_(data.fuel_used_l));
+    put_(sh, row, 'J',  num_(data.cost_per_liter));
+    put_(sh, row, 'K',  num_(data.no_trips) || 1);
+    put_(sh, row, 'R',  customer ? 'Customer: ' + customer : notes);
+    put_(sh, row, 'S',  data.manager || prevMgr[0] || DEFAULT_MANAGER);
+    put_(sh, row, 'T',  data.manager_phone || prevMgr[1] || DEFAULT_MANAGER_PHONE);
+    put_(sh, row, 'W',  data.start_destination || data.route || data.origin || '');
+    put_(sh, row, 'X',  num_(data.revenue));
+    put_(sh, row, 'Z',  data.cargo_type || '');
+    put_(sh, row, 'AA', num_(data.load_kg));
+    put_(sh, row, 'AB', data.fuel_station || '');
+    put_(sh, row, 'AC', data.gps_verified || 'PENDING');
+    put_(sh, row, 'AN', data.paid_status || 'Pending');
+    put_(sh, row, 'AT', num_(data.fuel_return_l));
+    put_(sh, row, 'AW', data.fill_type || 'Metered');
+
+    if (customer && notes) sh.getRange(row, colNum_('R')).setNote(notes);
+
+    var tripId = row - 2;
+    var photoUrl = savePhoto_(data, tripId);
+    if (photoUrl) sh.getRange(row, 1).setNote('Photo (' + (data.photo_type || 'capture') + '): ' + photoUrl);
+
+    SpreadsheetApp.flush();
+    out = { status: 'success', trip_id: tripId, row: row, photo: photoUrl || '',
+            message: 'Trip logged to Trip Log row ' + row };
+  } catch (err) {
+    out = { status: 'error', message: String(err) };
+  } finally {
+    try { lock.releaseLock(); } catch (x) {}
   }
 
-  document.getElementById('date').valueAsDate = new Date();
+  if (out.status === 'success') { try { runInvestigation(); } catch (x) {} }
+  return json_(out);
+}
 
-  let mode = 'scan';
-  function setMode(m) {
-    mode = m;
-    document.getElementById('btnScan').classList.toggle('active', m === 'scan');
-    document.getElementById('btnManual').classList.toggle('active', m === 'manual');
-    document.getElementById('scanCard').style.display = m === 'scan' ? 'block' : 'none';
-  }
+function doGet(e) {
+  try {
+    var action = (e && e.parameter && e.parameter.action) ? e.parameter.action : '';
+    var sh = SpreadsheetApp.getActive().getSheetByName(TRIP_SHEET);
+    var n = sh.getLastRow() - FIRST_ROW + 1;
+    var vals = sh.getRange(FIRST_ROW, 1, n, colNum_('AX')).getValues();
+    var C = function (l) { return colNum_(l) - 1; };
 
-  // ── Load vehicles & drivers for dropdowns ─────────────────────────
-  let vehicles = [];
-  fetch(API_URL + "?action=vehicles")
-    .then(r => r.json())
-    .then(data => {
-      vehicles = data.vehicles || [];
-      const sel = document.getElementById('registration');
-      sel.innerHTML = '<option value="">Select vehicle…</option>' +
-        vehicles.map(v => `<option value="${v.registration}">${v.registration} — ${v.make} ${v.model}</option>`).join('');
-    })
-    .catch(() => {
-      document.getElementById('registration').innerHTML = '<option value="">Could not load — check API_URL</option>';
-    });
-
-  fetch(API_URL + "?action=drivers")
-    .then(r => r.json())
-    .then(data => {
-      const drivers = data.drivers || [];
-      const sel = document.getElementById('driver_name');
-      sel.innerHTML = '<option value="">Select driver…</option>' +
-        drivers.map(d => `<option value="${d.driver_name}" data-phone="${d.phone || ''}">${d.driver_name}</option>`).join('');
-    })
-    .catch(() => {
-      document.getElementById('driver_name').innerHTML = '<option value="">Could not load — check API_URL</option>';
-    });
-
-  document.getElementById('registration').addEventListener('change', e => {
-    const v = vehicles.find(v => v.registration === e.target.value);
-    const hint = document.getElementById('vehicleHint');
-    if (v) {
-      hint.textContent = `Expected ${v.expected_kml} km/L · Last odometer ${v.current_odometer} km`;
-      if (!document.getElementById('odo_start').value) {
-        document.getElementById('odo_start').value = v.current_odometer;
+    if (action === 'recent') {
+      var trips = [];
+      for (var i = vals.length - 1; i >= 0 && trips.length < 50; i--) {
+        var r = vals[i];
+        if (!r[C('B')] || !r[C('D')]) continue;
+        trips.push({ trip_id: r[C('A')], date: r[C('B')], registration: r[C('D')],
+                     driver_name: r[C('E')], odo_start: r[C('G')], odo_end: r[C('H')] });
       }
-    } else {
-      hint.textContent = '';
+      return json_({ status: 'success', trips: trips });
+    }
+
+    if (action === 'vehicles') {
+      var last = {};
+      vals.forEach(function (r) {
+        var reg = String(r[C('D')]).trim();
+        if (!reg || !r[C('B')]) return;
+        var odo = typeof r[C('H')] === 'number' ? r[C('H')] : r[C('G')];
+        last[reg] = { last_odo: odo, driver: r[C('E')], expected_kml: r[C('O')] };
+      });
+      return json_({ status: 'success', vehicles: last });
+    }
+
+    if (action === 'investigate') { runInvestigation(); return json_({ status: 'success' }); }
+
+    return json_({ status: 'error', message: 'Invalid or missing action (use recent, vehicles, investigate).' });
+  } catch (err) {
+    return json_({ status: 'error', message: String(err) });
+  }
+}
+
+function json_(o) {
+  return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function put_(sh, row, letters, value) {
+  if (value === '' || value === null || value === undefined) return;
+  sh.getRange(row, colNum_(letters)).setValue(value);
+}
+
+function num_(x) {
+  if (x === '' || x === null || x === undefined) return '';
+  var n = Number(String(x).replace(/\s/g, '').replace(',', '.'));
+  return isNaN(n) ? '' : n;
+}
+
+function savePhoto_(data, tripId) {
+  if (!data.photo) return '';
+  var s = String(data.photo), mime = 'image/jpeg', b64 = s;
+  var m = s.match(/^data:(.+?);base64,(.*)$/);
+  if (m) { mime = m[1]; b64 = m[2]; }
+  var ext = mime.indexOf('png') >= 0 ? 'png' : 'jpg';
+  var blob = Utilities.newBlob(Utilities.base64Decode(b64), mime,
+    'Trip' + tripId + '_' + (data.photo_type || 'photo') + '.' + ext);
+  var it = DriveApp.getFoldersByName(PHOTO_FOLDER);
+  var folder = it.hasNext() ? it.next() : DriveApp.createFolder(PHOTO_FOLDER);
+  return folder.createFile(blob).getUrl();
+}
+
+function colNum_(letters) {
+  var n = 0;
+  for (var i = 0; i < letters.length; i++) n = n * 26 + (letters.charCodeAt(i) - 64);
+  return n;
+}
+
+/* ---------- 3. INVESTIGATION ENGINE ---------- */
+
+var SEV_ORDER = { '🔴': 0, '🟠': 1, '🟡': 2 };
+
+var ACTIONS = {
+  'Fuel Theft / Consumption': 'Verify fuel issue, fuel receipt, fuel station, odometer, GPS route and driver statement.',
+  'Return Fuel Variance':     'Verify tank level and the fuel filled on return against fuel used.',
+  'Route Deviation':          'Check route taken, stops and GPS against the official route distance.',
+  'GPS / Odometer':           'Verify GPS tracker signal, odometer reading and trip timestamps.',
+  'Driver Performance':       'Review driving behaviour, fuel efficiency, route discipline and incidents.',
+  'Maintenance':              'Inspect vehicle before the next long-distance dispatch.',
+  'Profitability':            'Do not repeat the same job structure without reviewing customer rate, route and trip costs.',
+  'Profitability-Low':        'Review customer rate, route and trip cost before accepting repeat work.'
+};
+
+function runInvestigation() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) return;
+  try {
+    var ss = SpreadsheetApp.getActive();
+    var alerts = buildAlerts_(ss.getSheetByName(TRIP_SHEET));
+    writeAlerts_(ss.getSheetByName(ALERT_SHEET), alerts);
+    var caseStatus = syncCases_(ss.getSheetByName(CASE_SHEET), alerts);
+    writeCentre_(ss.getSheetByName(CENTRE_SHEET), alerts, caseStatus);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function isNum_(x) { return typeof x === 'number' && isFinite(x); }
+
+function buildAlerts_(sh) {
+  var n = sh.getLastRow() - FIRST_ROW + 1;
+  if (n < 1) return [];
+  var vals = sh.getRange(FIRST_ROW, 1, n, colNum_('BP')).getValues();
+  var out = [];
+
+  vals.forEach(function (r, idx) {
+    var v = function (l) { return r[colNum_(l) - 1]; };
+    var date = v('B'), reg = String(v('D')).trim();
+    if (!date || !reg) return;
+
+    var trip = v('A'), tlRow = FIRST_ROW + idx;
+    var driver = String(v('E')).trim();
+    var route = short_(v('W')) + ' → ' + short_(v('Y'));
+    var add = function (sev, type, evidence, actionKey) {
+      out.push({ sev: sev, type: type, trip: trip, date: date, reg: reg, driver: driver,
+                 route: route, evidence: evidence, action: ACTIONS[actionKey || type], row: tlRow });
+    };
+
+    var N = v('N'), O = v('O'), L = v('L'), AX = v('AX');
+
+    if (v('Q') === 'YES' && isNum_(N) && isNum_(O) && O > 0) {
+      var variance = N / O - 1;
+      var excess = (isNum_(AX) && isNum_(L)) ? Math.max(0, AX - L / O) : 0;
+      add(variance <= -0.5 ? '🔴' : '🟠', 'Fuel Theft / Consumption',
+        'Actual KM/L: ' + fmt_(N, 2) + ' | Expected KM/L: ' + fmt_(O, 2) +
+        ' | Fuel variance: ' + pct_(variance) + ' | Estimated excess fuel: ' + fmt_(excess, 1) + ' L');
+    }
+
+    if (String(v('AV')).indexOf('CHECK FUEL') >= 0 && isNum_(v('AU'))) {
+      add('🟠', 'Return Fuel Variance',
+        'Fuel used: ' + fmt_(v('I'), 1) + ' L | Filled on return: ' + fmt_(v('AT'), 1) +
+        ' L | Mismatch: ' + pct_(v('AU')));
+    }
+
+    if (String(v('BD')).indexOf('CHECK ROUTE') >= 0 && isNum_(v('BC'))) {
+      add(Math.abs(v('BC')) > 0.5 ? '🔴' : '🟠', 'Route Deviation',
+        'Official route: ' + fmt_(v('BA'), 1) + ' km | GPS route: ' + fmt_(v('AF'), 1) +
+        ' km | Variance: ' + pct_(v('BC')));
+    }
+
+    var G = v('G'), H = v('H'), AF = v('AF');
+    if (isNum_(G) && isNum_(H) && H >= G && isNum_(AF) && AF > 0 && (H - G) > 0) {
+      var odo = H - G, gap = (AF - odo) / odo;
+      if (Math.abs(gap) > 0.10) {
+        add(Math.abs(gap) > 0.5 ? '🔴' : '🟠', 'GPS / Odometer',
+          'Odometer distance: ' + fmt_(odo, 1) + ' km | GPS distance: ' + fmt_(AF, 1) +
+          ' km | Gap: ' + pct_(gap));
+      }
+    }
+
+    var AD = v('AD');
+    if (isNum_(AD) && AD < 60) {
+      add(AD < 40 ? '🔴' : '🟠', 'Driver Performance', 'Driver score: ' + Math.round(AD) + '/100');
+    }
+
+    if (v('AE') === 'SERVICE DUE') add('🟠', 'Maintenance', 'Maintenance flag: SERVICE DUE');
+
+    var X = v('X'), AL = v('AL'), AM = v('AM');
+    if (isNum_(X) && X > 0 && isNum_(AL)) {
+      if (AL < 0) {
+        add('🔴', 'Profitability', 'Net profit: R' + fmt_(AL, 2) + ' | Revenue: R' + fmt_(X, 2) + ' | Margin: ' + pct_(AM));
+      } else if (isNum_(AM) && AM < 0.10) {
+        add('🟡', 'Profitability', 'Low margin: ' + pct_(AM) + ' | Net profit: R' + fmt_(AL, 2), 'Profitability-Low');
+      }
     }
   });
 
-  document.getElementById('driver_name').addEventListener('change', e => {
-    const opt = e.target.selectedOptions[0];
-    const phone = opt && opt.dataset.phone;
-    if (phone) document.getElementById('driver_phone').value = phone;
+  out.sort(function (a, b) {
+    return (SEV_ORDER[a.sev] - SEV_ORDER[b.sev]) || (a.trip - b.trip);
+  });
+  return out;
+}
+
+function writeAlerts_(sh, alerts) {
+  sh.getRange('A2:J1000').clearContent();
+  if (!alerts.length) return;
+  var rows = alerts.map(function (a) {
+    return [a.sev, a.type, a.trip, a.date, a.reg, a.driver, a.route, a.evidence, a.action, a.row];
+  });
+  sh.getRange(2, 1, rows.length, 10).setValues(rows);
+}
+
+function syncCases_(sh, alerts) {
+  var now = new Date();
+  var last = sh.getLastRow();
+  var existing = last >= 2 ? sh.getRange(2, 1, last - 1, 13).getValues() : [];
+  var byKey = {};
+  existing.forEach(function (r, i) { if (r[0]) byKey[r[4] + '|' + r[3]] = i; });
+
+  var active = {};
+  var fresh = [];
+  alerts.forEach(function (a) {
+    var key = a.trip + '|' + a.type;
+    active[key] = true;
+    if (key in byKey) {
+      var r = existing[byKey[key]];
+      var st = String(r[10] || 'OPEN').toUpperCase();
+      var autoCleared = st === 'CLEARED' && String(r[11]).indexOf('Auto-cleared') >= 0;
+      if (st === 'OPEN' || autoCleared) {
+        r[2] = a.sev; r[5] = a.reg; r[6] = a.driver; r[7] = a.route; r[8] = a.evidence; r[9] = a.action;
+        if (autoCleared) { r[10] = 'OPEN'; r[12] = ''; }
+        else if (!r[10]) r[10] = 'OPEN';
+      }
+    } else {
+      fresh.push(['CASE-' + Utilities.getUuid().replace(/-/g, '').substring(0, 8).toUpperCase(),
+                  now, a.sev, a.type, a.trip, a.reg, a.driver, a.route, a.evidence, a.action, 'OPEN', '', '']);
+    }
   });
 
-  // ── Photo capture + OCR ────────────────────────────────────────────
-  function setupPhotoOcr(inputId, btnId, previewId, statusId, targetFieldId, numericHint) {
-    const input = document.getElementById(inputId);
-    input.addEventListener('change', () => {
-      const file = input.files[0];
-      if (!file) return;
-      const url = URL.createObjectURL(file);
-      const preview = document.getElementById(previewId);
-      preview.src = url;
-      preview.style.display = 'block';
-      document.getElementById(btnId).classList.add('has-photo');
-      document.getElementById(btnId).textContent = '✓ Photo captured — tap to retake';
+  existing.forEach(function (r) {
+    if (!r[0]) return;
+    var key = r[4] + '|' + r[3];
+    var st = String(r[10] || 'OPEN').toUpperCase();
+    if (!active[key] && st === 'OPEN') {
+      r[10] = 'CLEARED';
+      r[11] = (r[11] ? r[11] + ' | ' : '') + 'Auto-cleared ' + Utilities.formatDate(now, Session.getScriptTimeZone(), 'yyyy-MM-dd') + ': no longer meets the rule';
+      r[12] = now;
+    }
+  });
 
-      const status = document.getElementById(statusId);
-      status.textContent = 'Reading photo…';
+  if (existing.length) sh.getRange(2, 1, existing.length, 13).setValues(existing);
+  if (fresh.length) sh.getRange(last + 1, 1, fresh.length, 13).setValues(fresh);
 
-      Tesseract.recognize(file, 'eng')
-        .then(({ data: { text } }) => {
-          const matches = text.match(/\d[\d,\. ]{2,}\d/g) || [];
-          if (matches.length) {
-            const best = matches.sort((a, b) => b.length - a.length)[0]
-              .replace(/[, ]/g, '');
-            status.textContent = `Detected "${best}" — check the field below before submitting`;
-            const field = document.getElementById(targetFieldId);
-            if (!field.value) field.value = parseFloat(best) || '';
-          } else {
-            status.textContent = 'Could not read a number — please enter it manually';
-          }
-        })
-        .catch(() => {
-          status.textContent = 'OCR failed — please enter the value manually';
-        });
-    });
+  var total = Math.max(last, 1) + fresh.length;
+  if (total >= 2) {
+    var rule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(['OPEN', 'INVESTIGATING', 'ESCALATED', 'CLEARED', 'CLOSED'], true).build();
+    sh.getRange(2, 11, Math.max(total, 1000) - 1, 1).setDataValidation(rule);
   }
 
-  setupPhotoOcr('odoPhotoInput', 'odoPhotoBtn', 'odoPreview', 'odoOcrStatus', 'odo_start');
-  setupPhotoOcr('fuelPhotoInput', 'fuelPhotoBtn', 'fuelPreview', 'fuelOcrStatus', 'fuel_used_l');
+  var status = {};
+  existing.forEach(function (r) { if (r[0]) status[r[4] + '|' + r[3]] = String(r[10] || 'OPEN').toUpperCase(); });
+  fresh.forEach(function (r) { status[r[4] + '|' + r[3]] = 'OPEN'; });
+  return status;
+}
 
-  // ── Submit ──────────────────────────────────────────────────────────
-  document.getElementById('tripForm').addEventListener('submit', e => {
-    e.preventDefault();
-    const btn = document.getElementById('submitBtn');
-    const result = document.getElementById('result');
-    btn.disabled = true;
-    btn.textContent = 'Logging…';
-    result.style.display = 'none';
-
-    const payload = {
-      date: document.getElementById('date').value,
-      registration: document.getElementById('registration').value,
-      driver_name: document.getElementById('driver_name').value,
-      driver_phone: document.getElementById('driver_phone').value,
-      odo_start: document.getElementById('odo_start').value,
-      odo_end: document.getElementById('odo_end').value,
-      fuel_used_l: document.getElementById('fuel_used_l').value,
-      cost_per_liter: document.getElementById('cost_per_liter').value,
-      fill_type: document.getElementById('fill_type').value,
-      fuel_filled_return_l: document.getElementById('fuel_filled_return_l').value,
-      start_destination: document.getElementById('start_destination').value,
-      end_destination: document.getElementById('end_destination').value,
-      cargo_type: document.getElementById('cargo_type').value,
-      load_kg: document.getElementById('load_kg').value,
-      fuel_station: document.getElementById('fuel_station').value,
-      revenue: document.getElementById('revenue').value,
-      customer: document.getElementById('customer').value,
-      manager: document.getElementById('manager').value,
-      notes: document.getElementById('notes').value
-    };
-
-    fetch(API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(payload)
-    })
-      .then(r => r.json())
-      .then(data => {
-        if (data.status === 'success') {
-          result.className = 'ok';
-          result.textContent = `✓ Trip #${data.trip_id} logged.`;
-          document.getElementById('tripForm').reset();
-          document.getElementById('date').valueAsDate = new Date();
-          document.getElementById('odoPreview').style.display = 'none';
-          document.getElementById('fuelPreview').style.display = 'none';
-        } else {
-          result.className = 'err';
-          result.textContent = '✗ ' + (data.message || 'Unknown error');
-        }
-      })
-      .catch(err => {
-        result.className = 'err';
-        result.textContent = '✗ Network error: ' + err.message;
-      })
-      .finally(() => {
-        btn.disabled = false;
-        btn.textContent = 'Log Trip';
-      });
+function writeCentre_(sh, alerts, caseStatus) {
+  var live = alerts.filter(function (a) {
+    var st = caseStatus[a.trip + '|' + a.type] || 'OPEN';
+    return st !== 'CLOSED' && st !== 'CLEARED';
   });
-</script>
-</body>
-</html>
+
+  var count = function (type) { return live.filter(function (a) { return a.type === type; }).length; };
+  var sev = function (s) { return live.filter(function (a) { return a.sev === s; }).length; };
+
+  sh.getRange('B5:B12').setValues([[live.length], [count('Fuel Theft / Consumption')],
+    [count('Return Fuel Variance')], [count('Route Deviation')], [count('GPS / Odometer')],
+    [count('Driver Performance')], [count('Maintenance')], [count('Profitability')]]);
+  sh.getRange('E5:E7').setValues([[sev('🔴')], [sev('🟠')], [sev('🟡')]]);
+
+  sh.getRange('A16:J1000').clearContent();
+  if (live.length) {
+    var rows = live.map(function (a) {
+      return [a.sev, a.type, a.trip, a.date, a.reg, a.driver, a.route, a.evidence, a.action,
+              caseStatus[a.trip + '|' + a.type] || 'OPEN'];
+    });
+    sh.getRange(16, 1, rows.length, 10).setValues(rows);
+  }
+  sh.getRange('A13').setValue('Last updated: ' +
+    Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm'));
+}
+
+/* ---------- helpers ---------- */
+
+function short_(s) { return String(s || '').split(',')[0].trim(); }
+
+function pct_(x) { return isNum_(x) ? (x * 100).toFixed(1) + '%' : ''; }
+
+function fmt_(n, dec) {
+  n = Number(n);
+  if (!isFinite(n)) return '';
+  var s = Math.abs(n).toFixed(dec).split('.');
+  s[0] = s[0].replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  return (n < 0 ? '-' : '') + s.join(',');
+}
